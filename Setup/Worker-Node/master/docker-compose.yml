@@ -1,0 +1,106 @@
+services:
+  postgres:
+    # Primary Postgres database for the n8n master node
+    image: postgres:17
+    restart: always
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_DB
+      - POSTGRES_NON_ROOT_USER
+      - POSTGRES_NON_ROOT_PASSWORD
+    volumes:
+      - db_storage:/var/lib/postgresql/data
+      - ./init-data.sh:/docker-entrypoint-initdb.d/init-data.sh # creates the non-root DB user
+    ports:
+      - 5433:5432 # host port can be changed if 5432 is already in use
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      n8n:
+        ipv4_address: 172.110.0.100 # static IP so workers can reach it
+
+  n8n:
+    # n8n master in queue mode with external runners enabled
+    image: n8nio/n8n:1.121.3
+    restart: always
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_NON_ROOT_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_NON_ROOT_PASSWORD}
+      - WEBHOOK_URL=$your-domain.com # replace with your public HTTPS endpoint
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+      - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - N8N_PROXY_HOPS=2
+      - N8N_CONCURRENCY_PRODUCTION_LIMIT=15
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=168
+      - EXECUTIONS_DATA_PRUNE_MAX_COUNT=3000
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_VERSION_NOTIFICATIONS_ENABLED=false
+      - N8N_TEMPLATES_ENABLED=false
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
+      - N8N_RUNNERS_AUTH_TOKEN=${RUNNERS_TOKEN} # must match workers and runners
+      - N8N_METRICS=true
+      - N8N_METRICS_INCLUDE_CACHE_METRICS=true
+      - N8N_METRICS_INCLUDE_MESSAGE_EVENT_BUS_METRICS=true
+      - N8N_METRICS_INCLUDE_API_ENDPOINTS=true
+      - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
+      - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+    ports:
+      - 127.0.0.1:5663:5678 # bind UI locally; relax if remote access is required
+    links:
+      - postgres
+      - redis
+    volumes:
+      - n8n_storage:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      n8n:
+        ipv4_address: 172.110.0.101
+
+  redis:
+    # Shared Redis for queues and health checks
+    image: redis:6-alpine
+    restart: always
+    volumes:
+      - redis_storage:/data
+    ports:
+      - 6380:6379 # exposed for workers; secure via firewall if on a shared host
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      n8n:
+        ipv4_address: 172.110.0.102
+
+
+networks:
+  n8n:
+    name: n8n
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.110.0.0/24 # fixed subnet to allow static container IPs
+
+volumes:
+  db_storage:
+  n8n_storage:
+  redis_storage:
